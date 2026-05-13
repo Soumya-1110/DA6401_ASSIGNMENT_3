@@ -366,7 +366,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     wandb.watch(model, log="gradients", log_freq=100)   # for Exp 2.2 grad-norm tracking
 
     # ── 5. Optimizer ─────────────────────────────────────────────────
-    base_lr = 1.0 if cfg["use_noam"] else cfg["fixed_lr"]
+    base_lr = 0.5 if cfg["use_noam"] else cfg["fixed_lr"]
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=base_lr, betas=cfg["betas"], eps=cfg["eps"])
 
@@ -397,12 +397,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
             "train_loss":  train_loss,
             "val_loss":    val_loss,
             "lr":          current_lr,
-        }, step=epoch)
-
-        # save every epoch + track best
-        save_checkpoint(model, optimizer, scheduler, epoch,
-                        path=os.path.join(cfg["checkpoint_dir"], f"epoch_{epoch}.pt"),
-                        dataset=train_ds)                                                    # ← add
+        }, step=epoch)                                                  # ← add
        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
