@@ -366,7 +366,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     wandb.watch(model, log="gradients", log_freq=100)   # for Exp 2.2 grad-norm tracking
 
     # ── 5. Optimizer ─────────────────────────────────────────────────
-    base_lr = 0.5 if cfg["use_noam"] else cfg["fixed_lr"]
+    base_lr = 0.25 if cfg["use_noam"] else cfg["fixed_lr"]
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=base_lr, betas=cfg["betas"], eps=cfg["eps"])
 
