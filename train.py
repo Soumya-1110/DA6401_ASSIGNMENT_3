@@ -383,36 +383,47 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
         loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     loss_fn = loss_fn.to(device)
 
-    # ── 8. Training loop ─────────────────────────────────────────────
+    # build a unique filename from the run's hyperparams so concurrent/sequential runs don't clobber
+    run_tag = (
+        f"{cfg.get('wandb_run_name') or 'run'}"
+        f"_dm{cfg['d_model']}_N{cfg['N']}_h{cfg['num_heads']}"
+        f"_dff{cfg['d_ff']}_drop{cfg['dropout']}"
+        f"_lr{'noam' if cfg['use_noam'] else cfg['fixed_lr']}"
+        f"_ls{cfg['label_smoothing']}"
+    )
+    ckpt_path = os.path.join(cfg["checkpoint_dir"], f"{run_tag}.pt")
+
     best_val_loss = float("inf")
     for epoch in range(cfg["num_epochs"]):
         train_loss = run_epoch(train_loader, model, loss_fn, optimizer,
-                               scheduler, epoch, is_train=True, device=device)
+                            scheduler, epoch, is_train=True, device=device)
         val_loss   = run_epoch(val_loader, model, loss_fn, None,
-                               None, epoch, is_train=False, device=device)
+                            None, epoch, is_train=False, device=device)
 
-        current_lr = optimizer.param_groups[0]["lr"]
         wandb.log({
-            "epoch":       epoch,
-            "train_loss":  train_loss,
-            "val_loss":    val_loss,
-            "lr":          current_lr,
-        }, step=epoch)                                                  # ← add
-       
+            "epoch":      epoch,
+            "train_loss": train_loss,
+            "val_loss":   val_loss,
+            "lr":         optimizer.param_groups[0]["lr"],
+        }, step=epoch)
+
+        # save ONLY when val_loss improves — overwrites itself, so one file per run
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, scheduler, epoch,
-                        path=os.path.join(cfg["checkpoint_dir"], "best.pt"),
-                dataset=train_ds)                                                    # ← add
+                            path=ckpt_path, dataset=train_ds)
+            print(f"  ↳ new best val_loss = {val_loss:.4f}  →  saved to {ckpt_path}")
+                                                # ← add
 
 
     # ── 9. Final BLEU on test set ────────────────────────────────────
     print("Evaluating BLEU on test set…")
-    load_checkpoint(os.path.join(cfg["checkpoint_dir"], "best.pt"), model)
+    load_checkpoint(ckpt_path, model)
     bleu = evaluate_bleu(model, test_loader, train_ds.tgt_itos,
-                          device=device, max_len=cfg["max_len"])
+                        device=device, max_len=cfg["max_len"])
     wandb.log({"test_bleu": bleu})
     print(f"test BLEU = {bleu:.2f}")
+
 
 
     wandb.finish()
