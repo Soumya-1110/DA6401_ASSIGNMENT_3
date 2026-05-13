@@ -26,7 +26,32 @@ wandb.login(key="wandb_v1_6IXf7bHRu3EpqW2Lo55HZMZZqL9_HeGxweYZJ755aaXzsBOedsOmjM
 
 
 from model import Transformer, make_src_mask, make_tgt_mask
-from dataset import Multi30kDataset, Multi30kTorchDataset, collate_fn, PAD_IDX, SOS_IDX, EOS_IDX
+from dataset import Multi30kDataset, PAD_IDX, SOS_IDX, EOS_IDX
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+
+
+class _PairsDataset(Dataset):
+    """Wraps Multi30kDataset.process_data() output for use with DataLoader."""
+    def __init__(self, pairs):
+        self.pairs = pairs
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        src_ids, tgt_ids = self.pairs[idx]
+        return (torch.tensor(src_ids, dtype=torch.long),
+                torch.tensor(tgt_ids, dtype=torch.long))
+
+
+def _collate(batch):
+    """Pad src/tgt to longest in batch with PAD_IDX."""
+    src_batch, tgt_batch = zip(*batch)
+    src_padded = pad_sequence(src_batch, batch_first=True, padding_value=PAD_IDX)
+    tgt_padded = pad_sequence(tgt_batch, batch_first=True, padding_value=PAD_IDX)
+    return src_padded, tgt_padded
+
 from lr_scheduler import NoamScheduler
 
 from sacrebleu import corpus_bleu
@@ -314,15 +339,16 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     val_pairs   = val_ds.process_data()
     test_pairs  = test_ds.process_data()
 
-    train_loader = DataLoader(Multi30kTorchDataset(train_pairs),
-                              batch_size=cfg["batch_size"], shuffle=True,
-                              num_workers=cfg["num_workers"], collate_fn=collate_fn)
-    val_loader   = DataLoader(Multi30kTorchDataset(val_pairs),
-                              batch_size=cfg["batch_size"], shuffle=False,
-                              num_workers=cfg["num_workers"], collate_fn=collate_fn)
-    test_loader  = DataLoader(Multi30kTorchDataset(test_pairs),
-                              batch_size=cfg["batch_size"], shuffle=False,
-                              num_workers=cfg["num_workers"], collate_fn=collate_fn)
+    train_loader = DataLoader(_PairsDataset(train_pairs),
+                            batch_size=cfg["batch_size"], shuffle=True,
+                            num_workers=cfg["num_workers"], collate_fn=_collate)
+    val_loader   = DataLoader(_PairsDataset(val_pairs),
+                            batch_size=cfg["batch_size"], shuffle=False,
+                            num_workers=cfg["num_workers"], collate_fn=_collate)
+    test_loader  = DataLoader(_PairsDataset(test_pairs),
+                          batch_size=cfg["batch_size"], shuffle=False,
+                          num_workers=cfg["num_workers"], collate_fn=_collate)
+
 
     # ── 4. Model ─────────────────────────────────────────────────────
     model = Transformer(
