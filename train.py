@@ -450,7 +450,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
             "train_loss": train_loss,
             "val_loss":   val_loss,
             "lr":         optimizer.param_groups[0]["lr"],
-        }, step=epoch)
+        })
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
