@@ -152,6 +152,8 @@ class MultiHeadAttention(nn.Module):
         if mask is not None:
             logits = logits.masked_fill(mask, float("-inf"))
         attn_w = F.softmax(logits, dim=-1)
+        self.attn_weights = attn_w.detach()       # ← new line, save for later inspection
+
         attn_w = self.dropout(attn_w)
         heads  = torch.matmul(attn_w, V)   
 
