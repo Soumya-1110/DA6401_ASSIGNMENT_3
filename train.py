@@ -359,6 +359,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
         num_heads      = cfg["num_heads"],
         d_ff           = cfg["d_ff"],
         dropout        = cfg["dropout"],
+        use_scaling    = cfg["use_scaling"],  
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -393,12 +394,56 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     )
     ckpt_path = os.path.join(cfg["checkpoint_dir"], f"{run_tag}.pt")
 
+    global_step    = 0
+    LOG_GRAD_STEPS = 1000
+
     best_val_loss = float("inf")
     for epoch in range(cfg["num_epochs"]):
-        train_loss = run_epoch(train_loader, model, loss_fn, optimizer,
-                            scheduler, epoch, is_train=True, device=device)
-        val_loss   = run_epoch(val_loader, model, loss_fn, None,
-                            None, epoch, is_train=False, device=device)
+        # ── manual train pass so we can log grad norms ──
+        model.train()
+        total_loss, total_tokens = 0.0, 0
+        for src, tgt in train_loader:
+            src, tgt = src.to(device), tgt.to(device)
+            tgt_in, tgt_out = tgt[:, :-1], tgt[:, 1:]
+            src_mask = make_src_mask(src, pad_idx=PAD_IDX)
+            tgt_mask = make_tgt_mask(tgt_in, pad_idx=PAD_IDX)
+
+            logits = model(src, tgt_in, src_mask, tgt_mask)
+            loss   = loss_fn(logits.reshape(-1, logits.size(-1)),
+                            tgt_out.reshape(-1))
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            # ── log Q/K grad norms in the first 1000 optimizer steps ──
+            if global_step < LOG_GRAD_STEPS:
+                q_norms = [layer.self_attn.W_Q.weight.grad.norm().item()
+                        for layer in model.encoder.layers]
+                k_norms = [layer.self_attn.W_K.weight.grad.norm().item()
+                        for layer in model.encoder.layers]
+                wandb.log({
+                    "step":          global_step,
+                    "q_grad_norm":   sum(q_norms) / len(q_norms),
+                    "k_grad_norm":   sum(k_norms) / len(k_norms),
+                    "q_grad_norm_l0": q_norms[0],
+                    "k_grad_norm_l0": k_norms[0],
+                })
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            n_tok = (tgt_out != PAD_IDX).sum().item()
+            total_loss   += loss.item() * n_tok
+            total_tokens += n_tok
+            global_step  += 1
+
+        train_loss = total_loss / max(total_tokens, 1)
+        print(f"[epoch {epoch}] train loss = {train_loss:.4f}")
+
+        val_loss = run_epoch(val_loader, model, loss_fn, None, None,
+                            epoch, is_train=False, device=device)
 
         wandb.log({
             "epoch":      epoch,
@@ -407,13 +452,12 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
             "lr":         optimizer.param_groups[0]["lr"],
         }, step=epoch)
 
-        # save ONLY when val_loss improves — overwrites itself, so one file per run
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, scheduler, epoch,
                             path=ckpt_path, dataset=train_ds)
-            print(f"  ↳ new best val_loss = {val_loss:.4f}  →  saved to {ckpt_path}")
-                                                # ← add
+            print(f"  ↳ new best val_loss = {val_loss:.4f}  →  {ckpt_path}")
+
 
 
     # ── 9. Final BLEU on test set ────────────────────────────────────

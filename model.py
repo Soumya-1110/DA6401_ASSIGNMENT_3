@@ -106,13 +106,14 @@ class MultiHeadAttention(nn.Module):
     """
 
     
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1, use_scaling: bool = True) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
         self.d_model   = d_model
         self.num_heads = num_heads
         self.d_k       = d_model // num_heads   # depth per head
+        self.use_scaling = use_scaling
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
         self.W_V = nn.Linear(d_model, d_model)
@@ -148,12 +149,13 @@ class MultiHeadAttention(nn.Module):
         V = self.W_V(value).view(batch, seq_k, self.num_heads, self.d_k).transpose(1, 2)
 
         # 2) scaled dot-product attention for all heads in parallel
-        logits = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_k ** 0.5)
+        logits = torch.matmul(Q, K.transpose(-2, -1))
+        if self.use_scaling:
+            logits = logits / (self.d_k ** 0.5)
         if mask is not None:
             logits = logits.masked_fill(mask, float("-inf"))
         attn_w = F.softmax(logits, dim=-1)
-        self.attn_weights = attn_w.detach()       # ← new line, save for later inspection
-
+        self.attn_weights = attn_w.detach()
         attn_w = self.dropout(attn_w)
         heads  = torch.matmul(attn_w, V)   
 
@@ -375,6 +377,7 @@ class Transformer(nn.Module):
         num_heads: int   = 8,
         d_ff:      int   = 1024,        # ← was 2048
         dropout:   float = 0.1,
+        use_scaling: bool = True,  
         checkpoint_path: str = "checkpoint.pt",
         gdrive_id: str = "<YOUR_DRIVE_FILE_ID>",
     ) -> None:
@@ -393,6 +396,13 @@ class Transformer(nn.Module):
         dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout)
         self.encoder = Encoder(enc_layer, N)
         self.decoder = Decoder(dec_layer, N)
+
+        if not use_scaling:
+            for layer in self.encoder.layers:
+                layer.self_attn.use_scaling = False
+            for layer in self.decoder.layers:
+                layer.self_attn.use_scaling  = False
+                layer.cross_attn.use_scaling = False
 
         self.generator = nn.Linear(d_model, tgt_vocab_size)
 
