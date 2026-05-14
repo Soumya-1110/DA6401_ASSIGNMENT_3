@@ -365,8 +365,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.2f} M")
-    wandb.watch(model, log="gradients", log_freq=100)   # for Exp 2.2 grad-norm tracking
-
+  
     # ── 5. Optimizer ─────────────────────────────────────────────────
     base_lr = 0.5 if cfg["use_noam"] else cfg["fixed_lr"]
     optimizer = torch.optim.Adam(model.parameters(),
@@ -395,62 +394,62 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     )
     ckpt_path = os.path.join(cfg["checkpoint_dir"], f"{run_tag}.pt")
 
-    global_step    = 0
-    LOG_GRAD_STEPS = 1000
+    def _epoch_pass(loader, train_mode: bool) -> tuple[float, float]:
+        """Single epoch over `loader`. Returns (avg_loss, avg_confidence) per non-pad token."""
+        model.train() if train_mode else model.eval()
+        total_loss, total_conf, total_tokens = 0.0, 0.0, 0
 
-    best_val_loss = float("inf")
-    for epoch in range(cfg["num_epochs"]):
-        # ── manual train pass so we can log grad norms ──
-        model.train()
-        total_loss, total_tokens = 0.0, 0
-        for src, tgt in train_loader:
+        for src, tgt in loader:
             src, tgt = src.to(device), tgt.to(device)
             tgt_in, tgt_out = tgt[:, :-1], tgt[:, 1:]
             src_mask = make_src_mask(src, pad_idx=PAD_IDX)
             tgt_mask = make_tgt_mask(tgt_in, pad_idx=PAD_IDX)
 
-            logits = model(src, tgt_in, src_mask, tgt_mask)
-            loss   = loss_fn(logits.reshape(-1, logits.size(-1)),
-                            tgt_out.reshape(-1))
+            with torch.set_grad_enabled(train_mode):
+                logits = model(src, tgt_in, src_mask, tgt_mask)
+                loss   = loss_fn(logits.reshape(-1, logits.size(-1)),
+                                tgt_out.reshape(-1))
 
-            optimizer.zero_grad()
-            loss.backward()
+            # prediction confidence: softmax prob assigned to the gold token, averaged over non-pad
+            with torch.no_grad():
+                probs        = F.softmax(logits, dim=-1)
+                gold_probs   = probs.gather(-1, tgt_out.unsqueeze(-1)).squeeze(-1)
+                non_pad_mask = (tgt_out != PAD_IDX)
+                n_tok        = non_pad_mask.sum().item()
+                batch_conf   = gold_probs[non_pad_mask].sum().item()    # sum, not mean — divide later
 
-            # ── log Q/K grad norms in the first 1000 optimizer steps ──
-            if global_step < LOG_GRAD_STEPS:
-                q_norms = [layer.self_attn.W_Q.weight.grad.norm().item()
-                        for layer in model.encoder.layers]
-                k_norms = [layer.self_attn.W_K.weight.grad.norm().item()
-                        for layer in model.encoder.layers]
-                wandb.log({
-                    "step":          global_step,
-                    "q_grad_norm":   sum(q_norms) / len(q_norms),
-                    "k_grad_norm":   sum(k_norms) / len(k_norms),
-                    "q_grad_norm_l0": q_norms[0],
-                    "k_grad_norm_l0": k_norms[0],
-                })
+            if train_mode:
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-
-            n_tok = (tgt_out != PAD_IDX).sum().item()
             total_loss   += loss.item() * n_tok
+            total_conf   += batch_conf
             total_tokens += n_tok
-            global_step  += 1
 
-        train_loss = total_loss / max(total_tokens, 1)
-        print(f"[epoch {epoch}] train loss = {train_loss:.4f}")
+        n = max(total_tokens, 1)
+        return total_loss / n, total_conf / n
 
-        val_loss = run_epoch(val_loader, model, loss_fn, None, None,
-                            epoch, is_train=False, device=device)
+
+    best_val_loss = float("inf")
+    for epoch in range(cfg["num_epochs"]):
+        train_loss, train_conf = _epoch_pass(train_loader, train_mode=True)
+        val_loss,   val_conf   = _epoch_pass(val_loader,   train_mode=False)
+
+        print(f"[epoch {epoch}] "
+            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"train_conf={train_conf:.4f} val_conf={val_conf:.4f}")
 
         wandb.log({
-            "epoch":      epoch,
-            "train_loss": train_loss,
-            "val_loss":   val_loss,
-            "lr":         optimizer.param_groups[0]["lr"],
+            "epoch":            epoch,
+            "train_loss":       train_loss,
+            "val_loss":         val_loss,
+            "train_confidence": train_conf,
+            "val_confidence":   val_conf,
+            "lr":               optimizer.param_groups[0]["lr"],
         })
 
         if val_loss < best_val_loss:
@@ -458,8 +457,6 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
             save_checkpoint(model, optimizer, scheduler, epoch,
                             path=ckpt_path, dataset=train_ds)
             print(f"  ↳ new best val_loss = {val_loss:.4f}  →  {ckpt_path}")
-
-
 
     # ── 9. Final BLEU on test set ────────────────────────────────────
     print("Evaluating BLEU on test set…")
