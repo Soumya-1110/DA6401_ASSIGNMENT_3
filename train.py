@@ -359,6 +359,7 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
         num_heads      = cfg["num_heads"],
         d_ff           = cfg["d_ff"],
         dropout        = cfg["dropout"],
+        learned_pos    = cfg["learned_pos"],
         use_scaling    = cfg["use_scaling"],  
     ).to(device)
 

@@ -163,6 +163,28 @@ class MultiHeadAttention(nn.Module):
         out = heads.transpose(1, 2).contiguous().view(batch, seq_q, self.d_model)
         return self.W_O(out)
 
+class LearnedPositionalEmbedding(nn.Module):
+    """
+    Learned positional encoding: nn.Embedding indexed by position.
+    Drop-in replacement for sinusoidal PositionalEncoding.
+
+    Args:
+        d_model  (int)  : Embedding dimensionality.
+        dropout  (float): Dropout applied after adding encodings.
+        max_len  (int)  : Maximum sequence length (must cover any input).
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+        super().__init__()
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [batch, seq_len, d_model]
+        seq_len   = x.size(1)
+        positions = torch.arange(seq_len, device=x.device).unsqueeze(0)   # [1, seq_len]
+        return self.dropout(x + self.pos_emb(positions))                  # broadcasts over batch
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
@@ -378,6 +400,7 @@ class Transformer(nn.Module):
         d_ff:      int   = 1024,        # ← was 2048
         dropout:   float = 0.1,
         use_scaling: bool = True,  
+         learned_pos: bool = False,  
         checkpoint_path: str = "checkpoint.pt",
         gdrive_id: str = "<YOUR_DRIVE_FILE_ID>",
     ) -> None:
@@ -389,7 +412,11 @@ class Transformer(nn.Module):
         self.d_model   = d_model
 
         # positional encoding (shared module — it's stateless other than the buffer)
-        self.pos_enc = PositionalEncoding(d_model, dropout=dropout)
+        self.pos_enc = (
+            LearnedPositionalEmbedding(d_model, dropout=dropout)
+            if learned_pos
+            else PositionalEncoding(d_model, dropout=dropout)
+        )
 
         # encoder / decoder stacks built from template layers
         enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout)
