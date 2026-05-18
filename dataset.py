@@ -22,15 +22,12 @@ class Multi30kDataset:
         Loads the Multi30k dataset and prepares tokenizers.
         """
         self.split = split
-        # Load dataset from Hugging Face
-        # https://huggingface.co/datasets/bentrevett/multi30k
         self.data = load_dataset("bentrevett/multi30k", split=split)
 
         # spaCy tokenizers for German (src) and English (tgt)
         self.spacy_de = spacy.load("de_core_news_sm")
         self.spacy_en = spacy.load("en_core_web_sm")
 
-        # vocabs are built lazily by build_vocab()
         self.src_vocab = None   # dict: token -> index   (stoi)
         self.tgt_vocab = None
         self.src_itos  = None   # list: index -> token   (itos)

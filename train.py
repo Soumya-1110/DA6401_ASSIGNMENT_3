@@ -1,20 +1,3 @@
-"""
-train.py — Training Pipeline, Inference & Evaluation
-DA6401 Assignment 3: "Attention Is All You Need"
-
-AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  greedy_decode(model, src, src_mask, max_len, start_symbol)         │
-  │      → torch.Tensor  shape [1, out_len]  (token indices)            │
-  │                                                                     │
-  │  evaluate_bleu(model, test_dataloader, tgt_vocab, device)           │
-  │      → float  (corpus-level BLEU score, 0–100)                      │
-  │                                                                     │
-  │  save_checkpoint(model, optimizer, scheduler, epoch, path) → None   │
-  │  load_checkpoint(path, model, optimizer, scheduler)        → int    │
-  └─────────────────────────────────────────────────────────────────────┘
-"""
-
 import os
 from typing import Optional
 import torch
@@ -29,6 +12,8 @@ from model import Transformer, make_src_mask, make_tgt_mask
 from dataset import Multi30kDataset, PAD_IDX, SOS_IDX, EOS_IDX
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
+from lr_scheduler import NoamScheduler
+from sacrebleu import corpus_bleu
 
 
 class _PairsDataset(Dataset):
@@ -44,7 +29,6 @@ class _PairsDataset(Dataset):
         return (torch.tensor(src_ids, dtype=torch.long),
                 torch.tensor(tgt_ids, dtype=torch.long))
 
-
 def _collate(batch):
     """Pad src/tgt to longest in batch with PAD_IDX."""
     src_batch, tgt_batch = zip(*batch)
@@ -52,24 +36,7 @@ def _collate(batch):
     tgt_padded = pad_sequence(tgt_batch, batch_first=True, padding_value=PAD_IDX)
     return src_padded, tgt_padded
 
-from lr_scheduler import NoamScheduler
-
-from sacrebleu import corpus_bleu
-
-
 class LabelSmoothingLoss(nn.Module):
-    """
-    Label smoothing as in "Attention Is All You Need"
-
-    Smoothed target distribution:
-        y_smooth = (1 - eps) * one_hot(y) + eps / (vocab_size - 1)
-
-    Args:
-        vocab_size (int)  : Number of output classes.
-        pad_idx    (int)  : Index of <pad> token — receives 0 probability.
-        smoothing  (float): Smoothing factor ε (default 0.1).
-    """
-
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1) -> None:
         super().__init__()
         self.eps = smoothing
@@ -306,7 +273,6 @@ DEFAULT_CONFIG = {
 def run_training_experiment(config: Optional[dict] = None) -> None:
     cfg = {**DEFAULT_CONFIG, **(config or {})}
 
-    # ── 1. W&B init ──────────────────────────────────────────────────
     wandb.init(
         project=cfg["wandb_project"],
         name=cfg["wandb_run_name"],
@@ -317,7 +283,6 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
 
-    # ── 2. Dataset + vocab ───────────────────────────────────────────
     print("Loading data…")
     train_ds = Multi30kDataset(split="train")
     train_ds.build_vocab()
@@ -334,7 +299,6 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     tgt_vocab_size = len(train_ds.tgt_itos)
     print(f"vocab — src: {src_vocab_size}, tgt: {tgt_vocab_size}")
 
-    # ── 3. DataLoaders ───────────────────────────────────────────────
     train_pairs = train_ds.process_data()
     val_pairs   = val_ds.process_data()
     test_pairs  = test_ds.process_data()
@@ -349,8 +313,6 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
                           batch_size=cfg["batch_size"], shuffle=False,
                           num_workers=cfg["num_workers"], collate_fn=_collate)
 
-
-    # ── 4. Model ─────────────────────────────────────────────────────
     model = Transformer(
         src_vocab_size = src_vocab_size,
         tgt_vocab_size = tgt_vocab_size,
@@ -366,25 +328,20 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.2f} M")
   
-    # ── 5. Optimizer ─────────────────────────────────────────────────
+
     base_lr = 0.5 if cfg["use_noam"] else cfg["fixed_lr"]
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=base_lr, betas=cfg["betas"], eps=cfg["eps"])
-
-    # ── 6. Scheduler ─────────────────────────────────────────────────
     scheduler = (
         NoamScheduler(optimizer, d_model=cfg["d_model"], warmup_steps=cfg["warmup_steps"])
         if cfg["use_noam"] else None
     )
-
-    # ── 7. Loss ──────────────────────────────────────────────────────
     if cfg["label_smoothing"] > 0:
         loss_fn = LabelSmoothingLoss(tgt_vocab_size, PAD_IDX, smoothing=cfg["label_smoothing"])
     else:
         loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     loss_fn = loss_fn.to(device)
-
-    # build a unique filename from the run's hyperparams so concurrent/sequential runs don't clobber
+    # Create descriptive run tag for checkpoint naming
     run_tag = (
         f"{cfg.get('wandb_run_name') or 'run'}"
         f"_dm{cfg['d_model']}_N{cfg['N']}_h{cfg['num_heads']}"
@@ -433,7 +390,6 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
         n = max(total_tokens, 1)
         return total_loss / n, total_conf / n
 
-
     best_val_loss = float("inf")
     for epoch in range(cfg["num_epochs"]):
         train_loss, train_conf = _epoch_pass(train_loader, train_mode=True)
@@ -452,25 +408,20 @@ def run_training_experiment(config: Optional[dict] = None) -> None:
             "lr":               optimizer.param_groups[0]["lr"],
         })
 
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss:                                #store the best epoch run
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, scheduler, epoch,
                             path=ckpt_path, dataset=train_ds)
             print(f"  ↳ new best val_loss = {val_loss:.4f}  →  {ckpt_path}")
 
-    # ── 9. Final BLEU on test set ────────────────────────────────────
+    # Final BLEU on test set
     print("Evaluating BLEU on test set…")
     load_checkpoint(ckpt_path, model)
     bleu = evaluate_bleu(model, test_loader, train_ds.tgt_itos,
                         device=device, max_len=cfg["max_len"])
     wandb.log({"test_bleu": bleu})
     print(f"test BLEU = {bleu:.2f}")
-
-
-
     wandb.finish()
-
-
 
 if __name__ == "__main__":
     run_training_experiment()
