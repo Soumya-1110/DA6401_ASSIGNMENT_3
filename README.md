@@ -5,7 +5,7 @@ A from-scratch PyTorch implementation of the Transformer architecture from
 **Multi30k** German → English dataset.
 
 - **GitHub repo:** `https://github.com/Soumya-1110/DA6401_ASSIGNMENT_3`
-- **W&B report (public):** `https://wandb.ai/ee23b140-iit-madras/da6401-a3/reports/DA6401-Assignment-03--VmlldzoxNjkyMTAwNg`
+- **W&B report (public):** `https://wandb.ai/ee23b140-iit-madras/da6401-a3/reports/DA6401-Assignment-03--VmlldzoxNjkyMTAwNg?accessToken=627286g449sfjg36knzyv9u1qlneoqaoi0zufflw2m3a0o2ap7sehlxd90eguf0d`
 
 ---
 
